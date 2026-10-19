@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "skills": {
+      "command": "uv",
+      "args": ["run", "--directory", "server", "skills-mcp", "--skills-dir", "../demo/.work/active", "--trace", "../demo/.work/trace.jsonl", "--watch", "0.5"]
+    }
+  }
+}

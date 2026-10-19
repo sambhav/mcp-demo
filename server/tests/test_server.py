@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -167,3 +168,74 @@ async def test_fallback_tools_and_tool_errors():
         assert "## Security" in text_of(ok)
         escape = await client.call_tool("read_skill_file", {"name": "code-review-checklist", "path": "../changelog/SKILL.md"})
         assert escape.is_error
+
+
+# --- live changes --------------------------------------------------------------------------
+
+
+def write_skill(root: Path, name: str, description: str, body: str = "Do it.") -> None:
+    (root / name).mkdir(parents=True, exist_ok=True)
+    (root / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n{body}\n")
+
+
+async def test_skills_added_while_running_show_up_everywhere(tmp_path):
+    write_skill(tmp_path, "first", "The first skill")
+    server = build_server([tmp_path], watch_seconds=0)
+    async with Client(server) as client:
+        assert await resource_uris(client) == {"skill://index.json", "skill://first/SKILL.md"}
+        for name in ("second", "third"):
+            write_skill(tmp_path, name, f"The {name} skill")
+        assert await resource_uris(client) == {"skill://index.json"} | {
+            f"skill://{n}/SKILL.md" for n in ("first", "second", "third")
+        }
+        index = json.loads((await client.read_resource("skill://index.json")).contents[0].text)["skills"]
+        assert [e["frontmatter"]["name"] for e in index] == ["first", "second", "third"]
+        assert index[2]["url"] == "skill://third/SKILL.md" and index[2]["digest"].startswith("sha256:")
+        listed = await client.session.send_request(skills_list(), RAW)
+        assert {s["frontmatter"]["name"] for s in listed["skills"]} == {"first", "second", "third"}
+        read = await client.read_resource("skill://third/SKILL.md")
+        assert "The third skill" in read.contents[0].text
+
+
+async def test_the_watcher_announces_adds_edits_and_swaps(tmp_path):
+    import anyio
+    from mcp.server.subscriptions import InMemorySubscriptionBus
+    from mcp.shared.subscriptions import ResourcesListChanged, ResourceUpdated
+
+    from skills_mcp.catalog import Catalog
+    from skills_mcp.server import watch
+
+    one, two = tmp_path / "one", tmp_path / "two"
+    write_skill(one, "alpha", "Alpha")
+    write_skill(two, "beta", "Beta")
+    live = tmp_path / "live"
+    live.symlink_to(one)
+
+    bus = InMemorySubscriptionBus()
+    events: list = []
+    bus.subscribe(events.append)
+    catalog = Catalog([live])
+
+    async def settle() -> None:
+        await anyio.sleep(0.15)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(watch, catalog, bus, 0.02)
+        await settle()
+
+        write_skill(one, "gamma", "Gamma")  # add
+        await settle()
+        assert ResourcesListChanged() in events
+
+        events.clear()
+        write_skill(one, "alpha", "Alpha, edited", body="New body, longer than before.")  # edit
+        await settle()
+        assert ResourceUpdated(uri="skill://alpha/SKILL.md") in events
+
+        events.clear()
+        live.unlink()
+        live.symlink_to(two)  # swap the whole folder
+        await settle()
+        assert ResourcesListChanged() in events
+        assert set(catalog.skills()) == {"beta"}
+        tasks.cancel_scope.cancel()

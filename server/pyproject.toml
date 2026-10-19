@@ -4,10 +4,11 @@ version = "0.1.0"
 description = "A basic MCP server that serves Agent Skills (SKILL.md folders) to any MCP client"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["mcp>=2.3,<3", "pyyaml>=6"]
+dependencies = ["mcp>=2.3,<3", "pyyaml>=6", "starlette", "uvicorn"]
 
 [project.scripts]
 skills-mcp = "skills_mcp.server:main"
+skills-mcp-ui = "skills_mcp.ui:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "anyio>=4"]

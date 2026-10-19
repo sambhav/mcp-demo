@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import time
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -42,9 +43,17 @@ TOOLS_ONLY_CLIENTS = ("zed", "copilot-cli", "copilot cli")
 class Negotiator:
     """Server middleware that decides each connection's tier and shapes what it is offered."""
 
-    def __init__(self, instructions: Callable[[Tier], str | None], fallback: Fallback = "auto"):
+    def __init__(
+        self,
+        instructions: Callable[[Tier], str | None],
+        resources: Callable[[], list[Any]],
+        fallback: Fallback = "auto",
+    ):
         self.instructions = instructions
+        self.resources = resources
         self.fallback = fallback
+        # 2025-era sessions (initialize handshake): change notifications are pushed to them directly.
+        self.sessions: weakref.WeakSet[Any] = weakref.WeakSet()
         self._seen_sep: set[tuple[str, str]] = set()
 
     def tier(self, ctx: ServerRequestContext[Any, Any]) -> Tier:
@@ -57,8 +66,20 @@ class Negotiator:
         name = (params.client_info.name if params else "").lower()
         return "tools" if any(known in name for known in TOOLS_ONLY_CLIENTS) else "resources"
 
+    async def notify_changed(self, updated: list[str]) -> None:
+        """Pushes list_changed (and resources/updated per edited file) to every 2025-era session."""
+        for session in list(self.sessions):
+            try:
+                await session.send_resource_list_changed()
+                for uri in updated:
+                    await session.send_resource_updated(uri)
+            except Exception:  # a closed session drops out of the WeakSet on its own
+                pass
+
     async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
         method = ctx.method
+        if method == "initialize":
+            self.sessions.add(ctx.session)
         if method == "skills/list":
             self._seen_sep.add(_client(ctx))
 
@@ -72,9 +93,10 @@ class Negotiator:
             return _shaped_handshake(result, tier, self.instructions(tier))
         if method == "tools/list" and tier != "tools":
             return _with(result, tools=[])
-        if method in {"resources/list", "resources/templates/list"} and tier != "resources":
-            key = "resources" if method == "resources/list" else "resourceTemplates"
-            return _with(result, **{key: []})
+        if method == "resources/list":
+            return _with(result, resources=self.resources() if tier == "resources" else [])
+        if method == "resources/templates/list" and tier != "resources":
+            return _with(result, resourceTemplates=[])
         return result
 
 
@@ -91,19 +113,12 @@ def _client(ctx: ServerRequestContext[Any, Any]) -> tuple[str, str]:
 
 
 def _with(result: HandlerResult, **fields: Any) -> HandlerResult:
+    """The result with some wire fields replaced (plain JSON values)."""
     if isinstance(result, BaseModel):
-        return result.model_copy(update={_attr(result, k): v for k, v in fields.items()})
+        return type(result).model_validate({**result.model_dump(by_alias=True, exclude_none=True), **fields})
     if isinstance(result, dict):
         return {**result, **fields}
     return result
-
-
-def _attr(model: BaseModel, wire: str) -> str:
-    """A model field's Python name from its wire name (`resourceTemplates` -> `resource_templates`)."""
-    for name, field in type(model).model_fields.items():
-        if wire in (name, field.alias):
-            return name
-    return wire
 
 
 def _shaped_handshake(result: HandlerResult, tier: Tier, instructions: str | None) -> HandlerResult:

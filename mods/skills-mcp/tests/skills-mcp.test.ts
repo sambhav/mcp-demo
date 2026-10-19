@@ -12,6 +12,7 @@ const RESOURCES = [
 /** Stands in for a session whose MCP servers list RESOURCES, beneath the plugin. */
 function session(on: On, commands: string[] = []) {
   on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
   on('store.get', () => ({ value: undefined }))
   on('store.set', () => ({ value: undefined }))
   on('command.list', () => ({ value: commands.map(name => ({ name, description: '', source: 'mcp' as const })) }))
@@ -60,3 +61,46 @@ test('a failed listing is reported, not thrown', async ($, on) => {
   const ran = await $.command.run({ command: 'skills-mcp', args: '' })
   expect(ran.text).toBe('Could not read the MCP skill index: no servers')
 })
+
+test('a server with a live index is read live, and changes are toasted', async ($, on) => {
+  let index = [{ url: 'skill://alpha/SKILL.md', frontmatter: { name: 'alpha', description: 'Alpha' } }]
+  const toasts: string[] = []
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', ($, e) => {
+    toasts.push(String(e.text))
+    return { value: undefined }
+  })
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('command.list', () => ({ value: [] }))
+  // Claude Code's cached listing, as of connect: only alpha, plus the index.
+  on('tool.call', { tool: 'ListMcpResourcesTool' }, () => ({
+    result: [
+      { uri: 'skill://index.json', name: 'index.json', server: 'skills' },
+      { uri: 'skill://alpha/SKILL.md', name: 'alpha', description: 'Alpha', server: 'skills' },
+    ],
+  }))
+  on('tool.call', { tool: 'ReadMcpResourceTool' }, ($, e) => ({
+    result: { contents: [{ uri: e.uri, text: JSON.stringify({ skills: index }) }] },
+  }))
+  const notes: string[] = []
+  on('session.append', ($, e, next) => {
+    notes.push(e.message.content.map(b => ('text' in b ? String(b.text) : '')).join(''))
+    return next(e)
+  })
+
+  expect((await $.command.run({ command: 'skills-mcp', args: '' })).text).toContain('1 MCP skills:')
+  index = [
+    ...index,
+    { url: 'skill://beta/SKILL.md', frontmatter: { name: 'beta', description: 'Beta' } },
+    // the earlier draft's shape
+    { url: 'skill://gamma/SKILL.md', name: 'gamma', description: 'Gamma', type: 'skill-md' } as never,
+  ]
+  const ran = await $.command.run({ command: 'skills-mcp', args: '' })
+  expect(ran.text).toContain('3 MCP skills:')
+  expect(ran.text).toContain('gamma  Gamma')
+  expect(toasts).toEqual(['MCP skills: +beta +gamma'])
+  expect(notes).toHaveLength(1)
+  expect(notes[0]).toContain('- gamma: Gamma (server: skills, uri: skill://gamma/SKILL.md)')
+})
+

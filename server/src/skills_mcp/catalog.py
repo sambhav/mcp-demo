@@ -76,14 +76,29 @@ class Catalog:
     """Skills under one or more roots, re-scanned on every read so edits show up live."""
 
     def __init__(self, roots: list[Path]):
-        self.roots = [root.expanduser().resolve() for root in roots]
+        # Resolved on every scan, so a root that is a symlink can be swapped to another folder.
+        self.roots = [root.expanduser().absolute() for root in roots]
         self.errors: list[str] = []
+
+    def fingerprint(self) -> tuple:
+        """Changes whenever a skill file is added, removed or edited, or a root is swapped."""
+        entries: list[tuple] = []
+        for root in self.roots:
+            real = root.resolve()
+            entries.append((str(real),))
+            for path in sorted(real.glob("*/**/*")) if real.is_dir() else []:
+                if path.is_file() and not _hidden(path, real):
+                    stat = path.stat()
+                    entries.append((path.relative_to(real).as_posix(), stat.st_mtime_ns, stat.st_size))
+        return tuple(entries)
 
     def skills(self) -> dict[str, Skill]:
         found: dict[str, Skill] = {}
         self.errors = []
-        for root in self.roots:
+        for root in (r.resolve() for r in self.roots):
             for skill_md in sorted(root.glob("*/SKILL.md")):
+                if skill_md.parent.name.startswith("."):
+                    continue  # staging folders and the like
                 try:
                     skill = parse_skill(skill_md)
                 except (ValueError, yaml.YAMLError) as err:

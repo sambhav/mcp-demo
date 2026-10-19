@@ -52,8 +52,9 @@ def skill_entry(skill: Skill) -> dict[str, Any]:
 class SkillsExtension(Extension):
     identifier = IDENTIFIER
 
-    def __init__(self, catalog: Catalog):
+    def __init__(self, catalog: Catalog, ttl_ms: int = TTL_MS):
         self.catalog = catalog
+        self.ttl_ms = ttl_ms
 
     def settings(self) -> dict[str, Any]:
         return {"directoryRead": True}
@@ -72,7 +73,7 @@ class SkillsExtension(Extension):
         result: dict[str, Any] = {
             "resultType": "complete",
             "skills": [skill_entry(s) for s in page],
-            "ttlMs": TTL_MS,
+            "ttlMs": self.ttl_ms,
             "cacheScope": "public",
         }
         if start + PAGE_SIZE < len(skills):
@@ -82,7 +83,7 @@ class SkillsExtension(Extension):
     async def _get(self, ctx: Any, params: GetSkillParams) -> dict[str, Any]:
         for skill in self.catalog.skills().values():
             if skill.uri == params.uri:
-                return {"resultType": "complete", "skill": skill_entry(skill), "ttlMs": TTL_MS, "cacheScope": "public"}
+                return {"resultType": "complete", "skill": skill_entry(skill), "ttlMs": self.ttl_ms, "cacheScope": "public"}
         raise MCPError(INVALID_PARAMS, f"Not a skill this server serves: {params.uri}")
 
     async def _read_dir(self, ctx: Any, params: ReadDirectoryParams) -> dict[str, Any]:
@@ -101,4 +102,4 @@ class SkillsExtension(Extension):
             uri = f"skill://{name}/{prefix}{head}"
             mime = "inode/directory" if sep else ("text/markdown" if head.endswith(".md") else "text/plain")
             children.setdefault(uri, {"uri": uri, "name": head, "mimeType": mime})
-        return {"resultType": "complete", "resources": list(children.values()), "ttlMs": TTL_MS, "cacheScope": "public"}
+        return {"resultType": "complete", "resources": list(children.values()), "ttlMs": self.ttl_ms, "cacheScope": "public"}

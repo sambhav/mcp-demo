@@ -8,14 +8,20 @@ else instructions and the list_skills / get_skill / read_skill_file tools.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import logging
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
+import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.mcpserver.resources.types import FileResource
+from mcp.server.subscriptions import InMemorySubscriptionBus
+from mcp.shared.subscriptions import ResourcesListChanged, ResourceUpdated
 from mcp.types import ToolAnnotations
 
 from .catalog import Catalog, Skill
@@ -23,6 +29,10 @@ from .extension import SkillsExtension
 from .negotiation import Fallback, Negotiator, Tier, Trace
 
 ENV_PATH = "SKILLS_MCP_PATH"
+# The pre-v1 SEP-2640 index (superseded by skills/list), served live for clients that cache
+# resources/list and poll a read instead.
+INDEX_URI = "skill://index.json"
+log = logging.getLogger("skills_mcp")
 READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
 
 
@@ -83,10 +93,26 @@ def build_server(
     fallback: Fallback = "auto",
     skills_extension: bool = True,
     trace: Path | None = None,
+    watch_seconds: float = 1.0,
+    ttl_ms: int = 60_000,
 ) -> MCPServer:
     catalog = Catalog(roots)
     initial = catalog.skills()
-    negotiator = Negotiator(lambda tier: instructions_for(catalog.skills(), tier), fallback)
+    bus = InMemorySubscriptionBus()
+    negotiator = Negotiator(
+        lambda tier: instructions_for(catalog.skills(), tier),
+        lambda: list_resources(catalog),
+        fallback,
+    )
+
+    @asynccontextmanager
+    async def lifespan(server: MCPServer) -> AsyncIterator[None]:
+        async with anyio.create_task_group() as tasks:
+            if watch_seconds > 0:
+                tasks.start_soon(watch, catalog, bus, watch_seconds, trace, negotiator)
+            yield
+            tasks.cancel_scope.cancel()
+
     mcp = MCPServer(
         name="skills",
         title="Agent Skills",
@@ -94,8 +120,10 @@ def build_server(
         # Rewritten per connection by the negotiator; set so the handshake carries the field.
         instructions=instructions_for(initial, "resources"),
         version="0.1.0",
-        extensions=[SkillsExtension(catalog)] if skills_extension else [],
+        extensions=[SkillsExtension(catalog, ttl_ms)] if skills_extension else [],
         middleware=[negotiator, *([Trace(trace, negotiator)] if trace else [])],
+        subscriptions=bus,
+        lifespan=lifespan,
     )
 
     @mcp.tool(annotations=READ_ONLY)
@@ -121,6 +149,10 @@ def build_server(
         with tool_errors():
             return catalog.get(name).resolve(path).read_text(encoding="utf-8", errors="replace")
 
+    @mcp.resource(INDEX_URI, mime_type="application/json", description="The skills this server serves now, read live")
+    def skill_index() -> str:
+        return json.dumps({"skills": [index_entry(s) for s in catalog.skills().values()]})
+
     @mcp.resource("skill://{name}/SKILL.md", mime_type="text/markdown", description="A skill's SKILL.md")
     def skill_md(name: str) -> str:
         return (catalog.get(name).root / "SKILL.md").read_text(encoding="utf-8")
@@ -129,28 +161,63 @@ def build_server(
     def skill_file(name: str, path: str) -> str:
         return catalog.get(name).resolve(path).read_text(encoding="utf-8", errors="replace")
 
-    # Listed once at startup; a skill added later is still readable through the templates above.
-    for skill in initial.values():
-        _add_listed_resources(mcp, skill)
-
     return mcp
 
 
-def _add_listed_resources(mcp: MCPServer, skill: Skill) -> None:
-    """Every file of the skill in resources/list, so clients that browse rather than template find them."""
-    mcp.add_resource(
-        FileResource(
-            uri=skill.uri,
-            name=skill.name,
-            description=skill.description,
-            mime_type="text/markdown",
-            path=(skill.root / "SKILL.md").resolve(),
-        )
-    )
-    for relative in skill.files():
-        path = (skill.root / relative).resolve()
-        mime = "text/markdown" if path.suffix == ".md" else "text/plain"
-        mcp.add_resource(FileResource(uri=f"skill://{skill.name}/{relative}", name=relative, mime_type=mime, path=path))
+def index_entry(skill: Skill) -> dict:
+    """One skill://index.json entry in both pre-v1 shapes: `url` + `digest` + `frontmatter` (as servers
+    shipped it) and top-level `name` / `description` / `type` (the earlier draft)."""
+    data = (skill.root / "SKILL.md").read_bytes()
+    return {
+        "name": skill.name,
+        "type": "skill-md",
+        "description": skill.description,
+        "url": skill.uri,
+        "digest": f"sha256:{hashlib.sha256(data).hexdigest()}",
+        "frontmatter": json.loads(json.dumps(skill.metadata, default=str)),
+    }
+
+
+def list_resources(catalog: Catalog) -> list[dict]:
+    """Every file of every skill, as resources/list answers it: read live, so new skills show at once."""
+    resources = [{"uri": INDEX_URI, "name": "index.json", "description": "The skills this server serves now, read live", "mimeType": "application/json"}]
+    for skill in catalog.skills().values():
+        resources.append({"uri": skill.uri, "name": skill.name, "description": skill.description, "mimeType": "text/markdown"})
+        for relative in skill.files():
+            mime = "text/markdown" if relative.endswith(".md") else "text/plain"
+            resources.append({"uri": f"skill://{skill.name}/{relative}", "name": relative, "mimeType": mime})
+    return resources
+
+
+async def watch(
+    catalog: Catalog,
+    bus: InMemorySubscriptionBus,
+    seconds: float,
+    trace: Path | None = None,
+    negotiator: Negotiator | None = None,
+) -> None:
+    """Polls the skill folders; on a change, tells clients the list (and changed files) moved:
+    2026-era clients through their subscriptions/listen stream, 2025-era ones on their connection."""
+    previous = catalog.fingerprint()
+    while True:
+        await anyio.sleep(seconds)
+        current = catalog.fingerprint()
+        if current == previous:
+            continue
+        before = {e[0]: e[1:] for e in previous[1:]}
+        after = {e[0]: e[1:] for e in current[1:]}
+        names = sorted(catalog.skills())
+        log.info("skills changed: %s", ", ".join(names) or "(none)")
+        if trace:
+            with trace.open("a") as f:
+                f.write(json.dumps({"at": time.time(), "method": "(skills changed)", "skills": names}) + "\n")
+        updated = [f"skill://{k}" for k in sorted(after.keys() & before.keys()) if after[k] != before[k]]
+        await bus.publish(ResourcesListChanged())
+        for uri in updated:
+            await bus.publish(ResourceUpdated(uri=uri))
+        if negotiator:
+            await negotiator.notify_changed(updated)
+        previous = current
 
 
 def main() -> None:
@@ -172,6 +239,12 @@ def main() -> None:
         help="for clients without the skills extension: resources, tools, or auto (tools for clients known "
         "not to read resources, resources otherwise)",
     )
+    parser.add_argument(
+        "--watch", type=float, default=1.0, metavar="SECONDS", help="how often to check the skill folders for changes (0: never)"
+    )
+    parser.add_argument(
+        "--ttl", type=float, default=60.0, metavar="SECONDS", help="how long clients may cache skills/list and skills/get"
+    )
     parser.add_argument("--trace", type=Path, help="append each request, what the client declared and its tier to this file")
     ns = parser.parse_args()
 
@@ -184,7 +257,7 @@ def main() -> None:
             print(f"! {error}")
         return
 
-    server = build_server(roots, fallback=ns.fallback, trace=ns.trace)
+    server = build_server(roots, fallback=ns.fallback, trace=ns.trace, watch_seconds=ns.watch, ttl_ms=int(ns.ttl * 1000))
     if ns.transport == "stdio":
         server.run("stdio")
     else:

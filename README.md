@@ -5,11 +5,27 @@ make those skills feel native, plus configs for other harnesses.
 
 ```
 skills/            three demo skills (SKILL.md folders)
-server/            skills-mcp: the MCP server (Python, MCP SDK 2.x)
+server/            skills-mcp: the MCP server (Python, MCP SDK 2.x), and skills-mcp-ui
+demo/              live demo: run.sh, SCRIPT.md (talk track), skill packs
 mods/              Claude Code mods: skills-mcp, skills-mcp-commands, skills-mcp-browser
 scripts/           enable-native-mcp-skills.sh (optional, see below)
 .mcp.json          runs the server for Claude Code in this repo
 ```
+
+## Live demo
+
+Change skills in a web page and watch a running Claude Code pick them up within about two seconds:
+
+```sh
+demo/run.sh ui       # terminal 1: http://127.0.0.1:8766
+demo/run.sh claude   # terminal 2
+```
+
+`demo/SCRIPT.md` is the talk track: add packs of skills, write one live, edit it, and swap the
+whole set. Behind it:
+- the server watches its folder (`--watch`, following a symlink swap);
+- the `skills-mcp` mod polls the server's live `skill://index.json`;
+- on a change, Claude Code gets a toast and a note in the conversation.
 
 ## The server
 
@@ -22,6 +38,13 @@ gets one way to reach the skills, the best it supports.
 | **sep** | The MCP Skills extension ([SEP-2640](https://github.com/modelcontextprotocol/ext-skills)): `skills/list`, `skills/get` (manifests with sha256 digests), `resources/directory/read`, and the `skill://` resources they name. No instructions, no tools. | The client declares `io.modelcontextprotocol/skills` in its capabilities, or calls `skills/list`. Claude Code with native MCP skills does the latter: it calls `skills/list` on seeing the server's declaration but doesn't declare anything itself. |
 | **resources** | A one-line `instructions` naming the skills, plus every skill file listed as a `skill://<name>/<path>` resource. | Any other client, by default. |
 | **tools** | A one-line `instructions`, plus `list_skills`, `get_skill(name, args?)`, `read_skill_file(name, path)`. | Clients known not to read resources (Zed, Copilot CLI, by `clientInfo.name`), or `--fallback tools`. MCP has no capability that says "I read resources", so this is the server's call. |
+
+Live changes: the server re-scans its folders every `--watch` seconds (default 1; a root that is a
+symlink can be swapped), lists resources from the live catalog, and on a change publishes
+`resources/list_changed` and `resources/updated` to clients subscribed through `subscriptions/listen`.
+It also serves `skill://index.json`, a live index in the pre-v1 SEP-2640 shape, for clients that cache
+`resources/list` and poll a read instead. Claude Code 2.1.296 is one: it doesn't subscribe at connect,
+so the `skills-mcp` mod polls the index.
 
 The server always declares the extension, so a client that speaks it can find it. Instructions go out
 in the handshake, before a client can be seen calling `skills/list`, so they stay one line. Protocol
@@ -37,6 +60,7 @@ uv run skills-mcp --skills-dir ~/my-skills --skills-dir ./team-skills
 uv run skills-mcp --transport streamable-http --port 8765  # http://127.0.0.1:8765/mcp
 uv run skills-mcp --list                                   # print what it finds
 uv run skills-mcp --fallback tools                         # tools tier for every non-SEP client
+uv run skills-mcp --watch 0.5 --trace /tmp/trace.jsonl     # check for changes twice a second; log requests
 uv run pytest                                              # tests
 ```
 
@@ -71,12 +95,12 @@ from the server's instructions and reads `skill://<name>/SKILL.md` with its reso
 
 | Mod | What it does |
 | --- | --- |
-| `skills-mcp` | Finds every `skill://…/SKILL.md` resource on every connected server (`ListMcpResourcesTool`), caches the index (session state, and across sessions so turn one has it), and adds one stable system-prompt section telling the model to read a skill with `ReadMcpResourceTool` before a matching task. The section changes only when the index does, so the prompt cache holds. Re-reads every 5 minutes, or on `/skills-mcp`. A name two servers share is shown as `server:name`. Skills Claude Code already loads natively are left to it. |
+| `skills-mcp` | Finds every `skill://…/SKILL.md` resource on every connected server, caches the index (session state, and across sessions so turn one has it), and adds one stable system-prompt section telling the model to read a skill with `ReadMcpResourceTool` before a matching task. The section changes only when the index does, so the prompt cache holds. Claude Code caches `resources/list` from connect time, so for servers that publish a live `skill://index.json` (the pre-v1 SEP-2640 index; this server does) it reads that every 2 seconds instead. When the index changes, it toasts the difference and appends a note to the conversation, which the model reads from its next request. Some managed builds keep user mods out of the system prompt, and the note covers that case. A name two servers share is shown as `server:name`. Skills Claude Code already loads natively are left to it. |
 | `skills-mcp-commands` | A `/<skill> [args]` command per skill. Typing one starts the turn with the skill's `SKILL.md` (read live as a resource) attached for the model, like a local skill's command. Never takes a name a local command or skill already has. |
 | `skills-mcp-browser` | `/mcp-skills` opens a pane: the skills, their server and URI, a preview of `SKILL.md`, and *Use* to fill the prompt. |
 
 Settings (`/config`): `skills-mcp.server` limits the index to one server; `skills-mcp.refreshSeconds`
-sets the refresh (0: start and `/skills-mcp` only); `skills-mcp-commands.prefix` prefixes the commands.
+sets the refresh (default 2; 0: start and `/skills-mcp` only); `skills-mcp-commands.prefix` prefixes the commands.
 
 To work on the mods from this checkout: `claude --plugin-dir mods/skills-mcp --plugin-dir mods/skills-mcp-commands --plugin-dir mods/skills-mcp-browser`;
 `claude plugin test mods/<mod>` runs a mod's tests.

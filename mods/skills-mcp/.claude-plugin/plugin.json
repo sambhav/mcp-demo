@@ -16,8 +16,8 @@
     "refreshSeconds": {
       "type": "number",
       "title": "Refresh interval (seconds)",
-      "description": "How often to re-read the skill index from the servers; 0: only at start and on /skills-mcp",
-      "default": 300
+      "description": "How often to re-read the skill index (a server's live skill-index:// resource when it has one); 0: only at start and on /skills-mcp",
+      "default": 2
     }
   }
 }

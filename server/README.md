@@ -20,4 +20,8 @@ uv run skills-mcp --list                                   # print what it finds
 uv run pytest
 ```
 
+Changes are live: `--watch SECONDS` re-scans the folders (following a swapped symlink), publishes
+`resources/list_changed` to subscribed clients, and `skill://index.json` always lists what's there now.
+`skills-mcp-ui` is the demo page that edits a watched folder (see `../demo`).
+
 Skill folders are re-read on every request, so editing a skill needs no restart.
