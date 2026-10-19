@@ -1,0 +1,23 @@
+{
+  "name": "skills-mcp",
+  "version": "0.1.0",
+  "description": "Skills MCP servers serve as skill:// resources, indexed for the model and cached, for sessions without native MCP skills",
+  "author": {
+    "name": "sambhav"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "server": {
+      "type": "string",
+      "title": "Skills MCP server",
+      "description": "Only index skills from this MCP server (its name in /mcp); empty: every connected server",
+      "default": ""
+    },
+    "refreshSeconds": {
+      "type": "number",
+      "title": "Refresh interval (seconds)",
+      "description": "How often to re-read the skill index from the servers; 0: only at start and on /skills-mcp",
+      "default": 300
+    }
+  }
+}

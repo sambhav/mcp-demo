@@ -1,0 +1,19 @@
+{
+  "name": "skills-mcp-commands",
+  "version": "0.1.0",
+  "description": "/<skill> runs a skill an MCP server serves, its SKILL.md read as a resource and attached to the prompt",
+  "author": {
+    "name": "sambhav"
+  },
+  "dependencies": [
+    "skills-mcp"
+  ],
+  "userConfig": {
+    "prefix": {
+      "type": "string",
+      "title": "Command prefix",
+      "description": "Put before each skill's name to make its command (empty: /<skill>)",
+      "default": ""
+    }
+  }
+}

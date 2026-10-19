@@ -1,0 +1,24 @@
+{
+  "name": "mcp-demo",
+  "description": "Mods for Agent Skills served over MCP (skill:// resources, SEP-2640)",
+  "owner": {
+    "name": "sambhav"
+  },
+  "plugins": [
+    {
+      "name": "skills-mcp",
+      "source": "./mods/skills-mcp",
+      "description": "Index the skills MCP servers serve as skill:// resources, for the model, cached"
+    },
+    {
+      "name": "skills-mcp-commands",
+      "source": "./mods/skills-mcp-commands",
+      "description": "/<skill> slash commands for MCP-served skills"
+    },
+    {
+      "name": "skills-mcp-browser",
+      "source": "./mods/skills-mcp-browser",
+      "description": "/mcp-skills pane to browse and preview MCP-served skills"
+    }
+  ]
+}

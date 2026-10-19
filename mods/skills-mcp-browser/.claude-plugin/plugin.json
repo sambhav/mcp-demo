@@ -1,0 +1,8 @@
+{
+  "name": "skills-mcp-browser",
+  "version": "0.1.0",
+  "description": "/mcp-skills opens a pane to browse, preview and use the skills an MCP skills server serves",
+  "author": { "name": "sambhav" },
+  "types": "./types/index.d.ts",
+  "dependencies": ["skills-mcp"]
+}

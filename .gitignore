@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+uv.lock.bak
+.claude-plugin/types/
+mods/*/.claude-plugin/types/
+mods/*/tsconfig.json
+.DS_Store
+server/uv.lock
