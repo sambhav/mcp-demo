@@ -14,16 +14,21 @@ scripts/           enable-native-mcp-skills.sh (optional, see below)
 ## The server
 
 `skills-mcp` serves every folder under `--skills-dir` that holds a `SKILL.md`, re-read on every
-request, so editing a skill needs no restart. Each skill reaches a client four ways, so whatever a
-client supports, it can use them:
+request, so editing a skill needs no restart. It does not offer every client everything: each client
+gets one way to reach the skills, the best it supports.
 
-| MCP primitive | What it serves | Who uses it |
+| Tier | Offered | Chosen when |
 | --- | --- | --- |
-| **Skills extension** ([SEP-2640](https://github.com/modelcontextprotocol/ext-skills), `io.modelcontextprotocol/skills`) | `skills/list`, `skills/get` (manifests with sha256 digests), `resources/directory/read` | Claude Code's native MCP skills |
-| **resources** | `skill://<name>/SKILL.md` and `skill://<name>/<path>`, all listed | Clients that read resources; the mods |
-| **instructions** | how to load a skill + the index with each skill's URI | Clients that pass server instructions to the model |
-| **tools** | `list_skills`, `get_skill(name, args?)`, `read_skill_file(name, path)` | Every client |
-| **prompts** | one per skill, argument `args` | Clients that turn prompts into slash commands |
+| **sep** | The MCP Skills extension ([SEP-2640](https://github.com/modelcontextprotocol/ext-skills)): `skills/list`, `skills/get` (manifests with sha256 digests), `resources/directory/read`, and the `skill://` resources they name. No instructions, no tools. | The client declares `io.modelcontextprotocol/skills` in its capabilities, or calls `skills/list`. Claude Code with native MCP skills does the latter: it calls `skills/list` on seeing the server's declaration but doesn't declare anything itself. |
+| **resources** | A one-line `instructions` naming the skills, plus every skill file listed as a `skill://<name>/<path>` resource. | Any other client, by default. |
+| **tools** | A one-line `instructions`, plus `list_skills`, `get_skill(name, args?)`, `read_skill_file(name, path)`. | Clients known not to read resources (Zed, Copilot CLI, by `clientInfo.name`), or `--fallback tools`. MCP has no capability that says "I read resources", so this is the server's call. |
+
+The server always declares the extension, so a client that speaks it can find it. Instructions go out
+in the handshake, before a client can be seen calling `skills/list`, so they stay one line. Protocol
+2026-07-28 keeps no connection between requests, so a `skills/list` call is remembered against the
+client's name and version. That's exact over stdio, where one process serves one client. On a shared HTTP
+server, clients with the same name and version share it; `--fallback resources|tools` fixes the non-SEP tier,
+and `--trace FILE` logs each request with what the client declared and the tier it got.
 
 ```sh
 cd server
@@ -31,6 +36,7 @@ uv run skills-mcp                                          # stdio, serves ../sk
 uv run skills-mcp --skills-dir ~/my-skills --skills-dir ./team-skills
 uv run skills-mcp --transport streamable-http --port 8765  # http://127.0.0.1:8765/mcp
 uv run skills-mcp --list                                   # print what it finds
+uv run skills-mcp --fallback tools                         # tools tier for every non-SEP client
 uv run pytest                                              # tests
 ```
 
@@ -50,8 +56,8 @@ Then pick the experience:
 ### 1. Plain MCP: every setup
 
 With nothing else, the skills are live over MCP in any Claude Code setup (Anthropic API, Bedrock,
-Vertex, Foundry, a gateway): the index rides in the server's instructions, the model loads a skill
-through its `skill://` resource or `get_skill`, and each skill is a `/mcp__skills__<name>` command.
+Vertex, Foundry, a gateway): Claude Code gets the resources tier, so the model learns the skill names
+from the server's instructions and reads `skill://<name>/SKILL.md` with its resource tool.
 
 ### 2. The mods: native-feeling, every setup
 
@@ -88,23 +94,26 @@ flag reaches you for real, the server needs no change, and the `skills-mcp` mod 
 
 ## Other harnesses
 
-Tools work everywhere; what else a harness picks up decides how skills show up. Checked against each
+The server offers each harness one tier (see above): today that's resources for most of them, and tools
+for Zed and Copilot CLI. If a harness on the resources tier turns out not to use resources, start the
+server with `--fallback tools` for it. What else a harness picks up decides how skills show up. Checked against each
 project's docs and source in October 2026; *unverified* where they did not say.
 
-| Harness | tools | resources | prompts | instructions | How skills show up |
-| --- | --- | --- | --- | --- | --- |
-| Codex CLI | ✓ | ✓ | ✗ | ✓ | the model reads the index from instructions, loads with `get_skill` or `read_mcp_resource` |
-| VS Code (Copilot agent) | ✓ | ✓ | ✓ | ✓ | `/skills.<name>` prompts; resources under *Add Context* |
-| Copilot CLI | ✓ | partial | unverified | allowlisted servers, or `--allow-all-mcp-server-instructions` | through the tools |
-| Gemini CLI | ✓ | ✓ | ✓ | ✓ | `/<name>` prompts, `@skill://name/SKILL.md` |
-| Antigravity | ✓ | ✓ | unverified | unverified | through the tools |
-| OpenCode | ✓ | ✓ | ✓ | ✓ | instructions + tools |
-| Goose | ✓ | ✓ | ✓ | ✓ | `/prompt <name>` |
-| Cursor | ✓ | ✓ | ✓ | unverified | prompts + tools |
-| Zed | ✓ | ✗ | ✓ | unverified | prompts + tools |
-| Cline, Continue | ✓ | ✓ | listed | unverified | through the tools |
+| Harness | reads resources | passes instructions to the model | Tier it gets | How skills show up |
+| --- | --- | --- | --- | --- |
+| Claude Code | ✓ | ✓ | resources; **sep** with native MCP skills | `skill://` reads; native `skills:<name>` skills when on |
+| Codex CLI | ✓ (`read_mcp_resource`) | ✓ | resources | the model reads `skill://<name>/SKILL.md` |
+| VS Code (Copilot agent) | ✓ | ✓ | resources | resource reads; resources under *Add Context* |
+| Copilot CLI | partial | allowlisted servers, or `--allow-all-mcp-server-instructions` | tools | `list_skills` / `get_skill` |
+| Gemini CLI | ✓ (`read_mcp_resource`, `@skill://…`) | ✓ | resources | resource reads, `@skill://name/SKILL.md` |
+| Antigravity | ✓ | unverified | resources | resource reads |
+| OpenCode | ✓ (`list_mcp_resources`) | ✓ | resources | resource reads |
+| Goose | ✓ | ✓ | resources | resource reads |
+| Cursor | ✓ | unverified | resources | resource reads |
+| Zed | ✗ | unverified | tools | `list_skills` / `get_skill` |
+| Cline, Continue | ✓ | unverified | resources | resource reads |
 
-None of these implement the SEP-2640 methods yet; the tools, prompts and instructions are what they use today.
+None of these other harnesses implement the SEP-2640 methods yet.
 
 In each snippet replace `/path/to/mcp-demo` with your checkout (or use the `uvx --from …` command above).
 

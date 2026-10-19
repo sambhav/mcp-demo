@@ -1,13 +1,8 @@
 """skills-mcp: serves Agent Skills over MCP.
 
-Each skill reaches a client four ways, so that whatever an MCP client supports, it can use them:
-
-- tools      list_skills / get_skill / read_skill_file (every client supports tools)
-- resources  skill://<name>/SKILL.md and skill://<name>/<path> (clients that browse resources)
-- prompts    one prompt per skill (clients that turn prompts into slash commands)
-- instructions  the skill index, sent once at initialize (clients that pass it to the model)
-
-and, for hosts that speak it, the MCP Skills extension (SEP-2640): skills/list and skills/get.
+Each connection is offered one way to reach the skills, the best its client supports (see
+negotiation.py): the MCP Skills extension (SEP-2640); else instructions and skill:// resources;
+else instructions and the list_skills / get_skill / read_skill_file tools.
 """
 
 from __future__ import annotations
@@ -20,12 +15,12 @@ from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.mcpserver.prompts.base import Prompt
 from mcp.server.mcpserver.resources.types import FileResource
 from mcp.types import ToolAnnotations
 
 from .catalog import Catalog, Skill
 from .extension import SkillsExtension
+from .negotiation import Fallback, Negotiator, Tier, Trace
 
 ENV_PATH = "SKILLS_MCP_PATH"
 READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
@@ -49,19 +44,21 @@ def default_roots() -> list[Path]:
     return [Path.cwd() / "skills"]
 
 
-def instructions_for(skills: dict[str, Skill]) -> str:
-    # Clients may keep only the opening of this text: the how-to comes first, the index after.
-    lines = [
-        "Agent Skills: folders of instructions for specialised tasks. When a task matches a",
-        "skill below, load it BEFORE starting and follow it: read its SKILL.md resource (the",
-        "skill:// URI) if you can read MCP resources, otherwise call get_skill(name). Paths a",
-        "skill mentions are relative to its folder (skill://<name>/<path>); read them the same",
-        "way, or with read_skill_file(name, path). Only load what the task needs.",
-        "",
-        "Skills:",
-    ]
-    lines += [f"- {s.name}: {s.description} ({s.uri})" for s in skills.values()] or ["- (none yet)"]
-    return "\n".join(lines)
+def instructions_for(skills: dict[str, Skill], tier: Tier) -> str | None:
+    """One short line per tier: sent before a client can be seen to speak SEP-2640, so it stays small."""
+    names = ", ".join(skills) or "none yet"
+    if tier == "sep":
+        return None
+    if tier == "resources":
+        return (
+            f"Agent Skills are available as this server's skill:// resources ({names}); the SKILL.md "
+            "resources carry their descriptions. Before a task one fits, read skill://<name>/SKILL.md "
+            "and follow it; paths it mentions are relative to skill://<name>/."
+        )
+    return (
+        f"Agent Skills are available ({names}): call list_skills for their descriptions, and "
+        "get_skill(name) before a task one fits, then follow what it returns."
+    )
 
 
 def render_skill(skill: Skill, args: str | None = None) -> str:
@@ -81,16 +78,24 @@ def render_skill(skill: Skill, args: str | None = None) -> str:
     return "\n".join(parts)
 
 
-def build_server(roots: list[Path], skills_extension: bool = True) -> MCPServer:
+def build_server(
+    roots: list[Path],
+    fallback: Fallback = "auto",
+    skills_extension: bool = True,
+    trace: Path | None = None,
+) -> MCPServer:
     catalog = Catalog(roots)
     initial = catalog.skills()
+    negotiator = Negotiator(lambda tier: instructions_for(catalog.skills(), tier), fallback)
     mcp = MCPServer(
         name="skills",
         title="Agent Skills",
         description="Agent Skills (SKILL.md folders) served over MCP",
-        instructions=instructions_for(initial),
+        # Rewritten per connection by the negotiator; set so the handshake carries the field.
+        instructions=instructions_for(initial, "resources"),
         version="0.1.0",
         extensions=[SkillsExtension(catalog)] if skills_extension else [],
+        middleware=[negotiator, *([Trace(trace, negotiator)] if trace else [])],
     )
 
     @mcp.tool(annotations=READ_ONLY)
@@ -124,20 +129,11 @@ def build_server(roots: list[Path], skills_extension: bool = True) -> MCPServer:
     def skill_file(name: str, path: str) -> str:
         return catalog.get(name).resolve(path).read_text(encoding="utf-8", errors="replace")
 
-    # Prompts are fixed at startup: clients cache prompts/list, so a new skill
-    # shows up as a prompt on the next restart (tools and resources see it at once).
+    # Listed once at startup; a skill added later is still readable through the templates above.
     for skill in initial.values():
-        mcp.add_prompt(_prompt_for(catalog, skill))
         _add_listed_resources(mcp, skill)
 
     return mcp
-
-
-def _prompt_for(catalog: Catalog, skill: Skill) -> Prompt:
-    def run(args: str = "") -> str:
-        return render_skill(catalog.get(skill.name), args or None)
-
-    return Prompt.from_function(run, name=skill.name, title=skill.name, description=skill.description)
 
 
 def _add_listed_resources(mcp: MCPServer, skill: Skill) -> None:
@@ -169,6 +165,14 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--list", action="store_true", help="print the skills found and exit")
+    parser.add_argument(
+        "--fallback",
+        choices=["auto", "resources", "tools"],
+        default="auto",
+        help="for clients without the skills extension: resources, tools, or auto (tools for clients known "
+        "not to read resources, resources otherwise)",
+    )
+    parser.add_argument("--trace", type=Path, help="append each request, what the client declared and its tier to this file")
     ns = parser.parse_args()
 
     roots = ns.skills_dir or default_roots()
@@ -180,7 +184,7 @@ def main() -> None:
             print(f"! {error}")
         return
 
-    server = build_server(roots)
+    server = build_server(roots, fallback=ns.fallback, trace=ns.trace)
     if ns.transport == "stdio":
         server.run("stdio")
     else:
